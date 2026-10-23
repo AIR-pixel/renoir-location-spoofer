@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LocSpoof</string>
+    <string name="hint_lat">纬度 (如 22.543096)</string>
+    <string name="hint_lon">经度 (如 114.057865)</string>
+    <string name="hint_acc">水平精度 米 (默认 5)</string>
+    <string name="hint_speed">速度 m/s (默认 0)</string>
+    <string name="label_enable">启用伪造</string>
+    <string name="btn_save">写入配置</string>
+    <string name="btn_status">自检</string>
+    <string name="state_off">已停用</string>
+    <string name="state_on">生效中</string>
+    <string name="tip_map">点击地图选点，自动换算为 WGS-84（Android 定位标准坐标）</string>
+    <string name="label_gcj">输入是GCJ-02</string>
+    <string name="btn_fav">收藏</string>
+    <string name="btn_paste">粘贴坐标</string>
+    <string name="btn_verify">验证定位（向系统要一次坐标）</string>
+    <string name="btn_restore">恢复真实定位（关闭伪造）</string>
+    <string name="label_city">快捷城市（离线可用，不依赖地图）</string>
+    <string name="tip">坐标写入后需点「自检」确认配置文件对 system_server 可读。\n作用域必须包含 android 与 com.android.phone，否则只改应用层、系统服务仍分发真实坐标。</string>
+
+    <string-array name="xposed_scope">
+        <item>android</item>
+        <item>com.android.phone</item>
+    </string-array>
+</resources>
