@@ -71,7 +71,7 @@ fastboot getvar unlocked        →  unlocked: yes
 # 2. Magisk app → 安装 → 选择并修补 boot.img（ramdisk +304160 字节）
 # 3. 双槽都写，避免切槽丢 root
 fastboot flash boot_ab magisk_patched_xxx.img
-# 4. 重启，su 可用 → 装本模块 → LSPosed 启用 → 勾选「系统框架」→ 重启
+# 4. 重启，su 可用 → 装本模块 → LSPosed 启用 → 勾选目标 App（不要勾系统框架）→ 重启
 ```
 
 renoir 是 A/B 分区、5.4 内核、**没有 init_boot**，patch 的是 `boot`。
@@ -431,7 +431,10 @@ Kotlin 编译守护进程偶尔报 `daemon has terminated unexpectedly`，不影
    原版 LSPosed 停更于 2023-10，README 只写到 Android 14；Vector v2.0 支持到 17 Beta。
 2. Magisk 里启用 Zygisk，重启。
 3. 装本模块 APK，在 Vector 里启用。
-4. **作用域必须勾选 `android` 和 `com.android.phone`**，再加目标 App。
+4. **作用域只勾目标 App**（外加模块自己 `com.air.locspoof`，界面上的「验证定位」靠它自检）。
+   **不要勾「系统框架」/ `android` / `com.android.phone`** —— 当前架构走 App 进程内改 getter，
+   根本不挂 system_server，勾上系统框架反而会在 A17 上把整机拖进 runtime restart 循环（见 0.5 节）。
+   模块的默认作用域已改成只含自身。
 5. 重启（作用域含 system_server 时必须重启，force-stop 不够）。
 6. 打开本 App 写入坐标 → 点「自检」确认 su 可用、配置可读。
 7. 看 Vector 日志里的 `[LocSpoof/Sys]` 确认 hook 装上了。
@@ -590,7 +593,190 @@ data_size       : 50244         # 真实 dex 只有 50KB
 
 ---
 
-## 12. 相关仓库
+## 12. 跨设备部署：任何有 root 的设备（含 VMOS / Android 9）
+
+模块**不绑定任何机型**：全部 hook 点都是 boot classpath 上的系统类
+（`Location` / `LocationManager` / `GnssStatus` / `WifiManager` / `TelephonyManager` / `Settings.Secure`），
+且一律「按方法名反射扫描 + 找不到就跳过」，不写死版本号。
+换设备只需三件事：root + Xposed 框架 + 本模块。
+
+### 12.1 版本兼容矩阵（已按 SDK `api-versions.xml` 逐条核对）
+
+| 项 | 引入版本 | 本模块怎么处理 |
+|---|---|---|
+| `Location.setExtras(Bundle)` | **API 1** | 直接调用，A9 上安全 |
+| `Location.getExtras()` | API 1 | hook |
+| `Location.isFromMockProvider()` | API 18 | hook |
+| `Location.isMock()` / `setMock()` | **API 31** | 反射按名扫描，A9 上不存在 → 自动跳过 |
+| `GnssStatus.getBasebandCn0DbHz()` 等 | API 30 | 同上，自动跳过 |
+| `LocationManager.getLastKnownLocation(String)` | API 1 | 公开重载只有 1 参，现有过滤条件正确 |
+| `Settings.Secure.getInt(cr,key,def)` | API 1 | 3 参重载也 hook，见 12.4 |
+
+`minSdk` 已从 30 降到 **28**（Android 9）。降 minSdk 不影响向上兼容，A17 照常。
+产物是纯 dex、**不含 native 库**（`aapt2 dump badging` 无 `native-code` 条目），x86_64 / arm64 都能装。
+
+### 12.2 框架与平台选型
+
+VMOS Pro（3.1.8）自带 root 与 Xposed，两条路：虚拟机工具箱里直接激活内置 Xposed（省事），
+或导入 Magisk APK 触发自动 root、再刷 `LSPosed-v1.9.2-7024-zygisk-release.zip`（可控）。
+
+框架选型与各平台详细操作见 **第 13 节**（2026-10 已更新为三分天下的现状）。
+
+### 12.3 VMOS 的三个坑（已处理两个，第三个要手动）
+
+1. **`su` 不是标准 Magisk su**。VMOS Pro（3.1.8）自带 root 开关，是官方的「虚拟 root」，
+   不是 Magisk 体系，`restorecon` 很可能不存在。
+   已处理：`Prefs.pushToSystem()` 把 `restorecon` 拆成独立命令，失败只警告、不算失败。
+   注意 VMOS Pro 官方已支持自带 Xposed，**不必再导 Magisk APK**（那是老版本的绕法）。
+2. **「明明生效却报失败」**。当前架构只勾目标 App，不依赖 `/data/system/locspoof.xml`，
+   但根目录写不进去时旧逻辑会整体报失败。已处理：`MainActivity.push()` 的成功判定只看
+   App 侧通道（`Settings.Secure` 的 flag + 坐标），`/data/system` 同步失败降级成警告文案。
+3. **VMOS 自带的位置模拟会叠加**。它走系统 test provider 机制，本模块在 App 进程内改 getter，
+   两者不冲突但会互相盖：VMOS 先改系统定位 → 本模块再把 getter 改成目标坐标 → 最终以本模块为准。
+   排查时容易分不清是谁在起作用，建议把 VMOS 的位置模拟关掉。
+
+### 12.4 `mock_location` 痕迹的覆盖范围
+
+`Settings.Secure` 的 `mock_location` 是最廉价的检测面，而同一个 key 有多条读取路径：
+
+```
+getInt(cr, "mock_location")                         2 参
+getInt(cr, "mock_location", 0)                      3 参（带默认值，最常见）
+getStringForUser(cr, "mock_location", uid)          3 参
+NameValueCache.getStringForUser(cr, tag, name, uid) 4 参（内部汇聚点）
+```
+
+只挡 2 参那条，其余都能读到真值 1 —— 而 `getInt(cr, key, 0)` 恰恰是检测 SDK 最爱用的写法。
+现在按方法名反射覆盖以上全部路径，并额外 hook `Settings$NameValueCache`
+（所有 `Settings.get*` 的内部汇聚点，private static 嵌套类，类名照样反射得到）。
+key 在参数里的位置各版本不同（2 参时在 index 1，NameValueCache 里在 index 2），
+所以不按固定下标取，而是扫所有 String 参数找 `mock_location`。
+
+### 12.5 加固 App 在虚拟机上的额外风险
+
+目标 App 是爱加密 + zxprotect 加固包（见第 11 节）。加固壳除了校验 dex/签名，
+还会检测运行环境（模拟器/虚拟化特征）——**VMOS 这类虚拟化容器更容易触发风控**。
+本模块解决不了这一层：hook 装在壳解密真实 dex 之前，对系统类的 hook 不受影响，
+但壳自身的环境检测走另一套逻辑，只能靠目标 App 自己的容忍度。
+
+### 12.6 实测状态
+
+⚠️ **VMOS + A9 这条路目前只做了代码级与平台机制层面的核对，没有实机验证**：
+
+- `minSdk 28` 的产物已编译通过并验过 badging（`minSdkVersion:'28'` / `targetSdkVersion:'35'`）；
+- 所有 API 引入版本已按 SDK `api-versions.xml` 逐条核对，无 A9 不可用的直接调用；
+- 框架三分天下的现状与 VMOS Pro 的操作路径是 2026-10 检索确认的（含版本号与 ROM 兼容性），
+  但**设备侧没有真机跑过**：`adb devices` 为空，VMOS 的激活也不走常规 `adb connect 5555`。
+
+要实测得在 VMOS 虚拟机内直接操作（或用它的共享目录导日志），装模块、勾作用域、
+写坐标、验证四步可以各跑一遍出对比数据。
+
+---
+
+## 13. 跨平台直接使用：操作手册
+
+### 13.1 一句话
+
+**任何能拿到 root 的 Android 环境都能用**：拿 root → 装框架 → 装本模块 → 勾目标 App → 写坐标。
+模块是纯 dex、无 native 库、`minSdk 28`，架构无关，不绑定机型。
+
+### 13.2 框架选型（2026-10 现状，三分天下）
+
+| 框架 | 最后版本 | 源码 | Android | Root 要求 | 加载本模块 |
+|---|---|---|---|---|---|
+| LSPosed 1.9.2 | 2023-10，GitHub 已归档 | 公开 | 8.1 – 14 | Magisk 24+ | ✅ |
+| LSPosed 2.x | 2.2.1（2026-10） | **闭源**，仅 Telegram / lsposed.zip | 9 – 17 | Magisk 27+ / KSU / APatch | ✅ |
+| Vector 2.x | 2.2（2026-08），JingMatrix fork | 公开 GPL-3.0 | 8.1 – 17 | Magisk 27+ / KSU / APatch | ✅ |
+
+本模块用 `de.robv.android.xposed:api:82`（**经典 Xposed API**），不属于被
+Vector 2.1+ / LSPosed 2.x 拒绝的「仅按 libxposed API 100 构建」那一类，三家框架均可加载。
+`xposedminversion` 已设为 **82**（最宽兼容；写 93 虽然三家都过，但会把只报 82/89 的小框架挡在外面，
+且 LSPosed 2.2 起会据此弹兼容警告，官方建议就是 82）。
+
+选型建议：
+
+- **A9–A14 的虚拟机 / 老机**：LSPosed 1.9.2 zygisk。A9 上唯一稳的老牌选择，资源占用也最小。
+- **A15+ 物理机**：Vector 2.x（开源可审计）或 LSPosed 2.x（对检测的隐藏能力更强）。
+- **一次只装一个框架**，混装会互相冲突。
+
+### 13.3 通用六步（任何平台都一样）
+
+```
+① 拿 root（Magisk / KernelSU / APatch，Magisk 要在设置里开 Zygisk）
+② 刷框架 zip → 重启
+③ 装框架管理器 APK + 本模块 APK
+④ 管理器里启用模块；作用域【只勾目标 App + com.air.locspoof】
+   ⚠️ 绝对不要勾「系统框架」/ android / com.android.phone —— 见 0.5 节
+⑤ 打开本 App → 点地图选点或填坐标 → 右上开关打开
+⑥ 点「验证定位」，看回包是否等于目标坐标
+```
+
+### 13.4 各平台差异
+
+| 平台 | root 怎么拿 | 框架怎么装 | 注意 |
+|---|---|---|---|
+| 普通物理机 | 解锁 BL → Magisk / KSU / APatch | Magisk → 模块 → 从本地安装 zip | BL 解锁会清数据，先备份 |
+| **VMOS Pro（A9）** | 虚拟机内设置里一键开，不动真机 | 内置 Xposed 或刷 1.9.2 zip | VMOS 自带位置模拟要关，见 13.5 |
+| 云手机 / 远程真机 | 看厂商是否给 root | — | 不给 root 就整条路线走不通 |
+| 免 root（LSPatch） | 不需要 | 内嵌模块进目标 APK | **本项目目标 App 是加固包，不可行**，见第 11 节 |
+
+### 13.5 VMOS Pro（A9）详细步骤
+
+VMOS Pro 3.1.8（湖南小算科技）。官方支持 A9–A15，其中 **A9 64-bit ROM 最稳**；
+A13/A14 有已知的「开机卡 99%」问题，官方自己都建议退回「安卓 9.0 尝鲜版」ROM。
+
+```
+1. VMOS Pro → 添加虚拟机 → 选「Android 9.0 (64-bit)」ROM
+   RAM ≥ 3GB（真机总内存 6GB 以上时），存储 8–32GB
+2. 启动虚拟机 → 设置 → 关于手机 → 连点版本号 → 开启开发者模式
+3. 设置 → 系统设置 → 开发者选项 →【Root 开关】→ 按提示重启虚拟机
+4. 关掉 VMOS 自带位置模拟：虚拟机内 设置 → 位置信息 → 关
+   （不关它会和本模块互相盖：VMOS 改系统定位 → 本模块再改 getter → 最终以本模块为准。
+     排查时分不清是谁在起作用）
+5. 装框架，二选一：
+   A. 虚拟机工具箱 → Xposed → 安装激活框架（省事）
+   B. 导入 Magisk APK 触发自动 root → Magisk 模块 → 从本地安装
+      LSPosed-v1.9.2-7024-zygisk-release.zip（可控，需 Magisk 开 Zygisk）
+6. 装本模块 APK → 框架里启用 → 作用域只勾目标 App + com.air.locspoof
+7. 重启虚拟机 → 打开本 App 写坐标 → 点「验证定位」
+```
+
+**adb 调试**：VMOS Pro 的激活走「vmos 助手 + 无线调试 + 配对码配对」，
+不是常规的 `adb connect <ip>:5555`。要看日志就在虚拟机内直接抓，
+或用 VMOS 的共享目录把 log 导出到真机。
+
+### 13.6 装好后怎么确认真的生效
+
+框架日志里搜 `[LocSpoof]`，正常的注入日志长这样：
+
+```
+[LocSpoof/App] forged location getters
+[LocSpoof/App] faked gnss status x12
+[LocSpoof/App] blocked wifi scan x1
+[LocSpoof/App] neutralized wifi info x2
+[LocSpoof/App] blocked cell info x1
+[LocSpoof/App] masked mock_location getters on Secure xN
+```
+
+**缺 `forged location getters` 就是没注入**，按顺序查：
+1. 作用域里有没有勾目标 App（最常见原因）；
+2. 目标 App 是否 force-stop 后重开过（勾完作用域必须重启目标进程，光重启虚拟机不够）；
+3. 框架是否真的装上了（管理器显示已激活）。
+
+### 13.7 失败模式对照表
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| APK 装不上 | minSdk 不满足 | 本模块 minSdk 28，A9+ 都能装；还装不上查签名/渠道 |
+| 模块在框架里显示，但不生效 | 作用域没勾 / 目标进程没重启 | 勾目标 App + force-stop 目标 App |
+| 手机或虚拟机自己重启 | 勾了「系统框架」 | 取消勾选，见 0.5 节 |
+| 界面报「/data/system 同步失败」但定位正常 | VMOS 的 su 写不了 /data/system | 已知且无害，只看坐标是否生效（12.3 节第 2 条） |
+| 界面显示已生效，目标 App 却拿到真实坐标 | 目标 App 不在作用域，或走 WiFi 指纹 | WiFi/基站屏蔽只在作用域内的进程生效，确认目标 App 已勾 |
+| 加固 App 闪退 | 壳检测到 hook / 虚拟化 | 与模块无关，换环境或放弃 |
+
+---
+
+## 14. 相关仓库
 
 | 仓库 | 内容 |
 |---|---|

@@ -21,8 +21,14 @@
 
         <meta-data android:name="xposedmodule" android:value="true" />
         <meta-data android:name="xposeddescription"
-            android:value="系统级定位伪造：hook system_server 分发路径，抹除 mock 标记，屏蔽 raw GNSS" />
-        <meta-data android:name="xposedminversion" android:value="93" />
+            android:value="定位伪造（App 进程内）：改写 Location getter、伪造 GnssStatus、屏蔽 WiFi/基站与 mock 痕迹。不挂系统框架。" />
+        <!--
+            82 = 最早的经典 Xposed API level。设这个值表示「兼容一切 >= 82 的框架」：
+            LSPosed 1.9.2 报 93、LSPosed 2.x 报 101、Vector 2.x 报 100/101/102，都 >= 82。
+            之前写 93 虽然这三家都过，但会把只报 82/89 的小框架挡在外面，
+            且 LSPosed 2.2 起会据此弹兼容警告，官方建议就是 82。
+        -->
+        <meta-data android:name="xposedminversion" android:value="82" />
         <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
 
         <activity

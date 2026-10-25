@@ -48,7 +48,11 @@ object FakeLoc {
         l.speed = cfg.speed
 
         template?.let { t ->
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // `Location.setMock()` 是 **API 31** 才公开的（Android 12）。
+            // 更早的版本只有隐藏的 `setIsFromMockProvider()`。
+            // 这里必须按 S(31) 判，不能按 Q(29)：
+            // 在 A10/A11 上 setMock 根本不存在，调用会抛 NoSuchMethodError。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 // 保持与原始 fix 一致的 provider 之外的元数据可信度
                 l.isMock = false
             }

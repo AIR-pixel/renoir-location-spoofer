@@ -20,7 +20,16 @@
     <string name="tip">坐标写入后需点「自检」确认配置文件对 system_server 可读。\n作用域必须包含 android 与 com.android.phone，否则只改应用层、系统服务仍分发真实坐标。</string>
 
     <string-array name="xposed_scope">
-        <item>android</item>
-        <item>com.android.phone</item>
+        <!--
+            只默认勾自己（界面上的「验证定位」按钮靠它在自身进程里自检）。
+
+            绝对不要再放 android / com.android.phone：
+            当前架构走「目标 App 进程内改 getter」，**不挂 system_server**
+            （见 README 0.5 节）。留在作用域里会在 A17 上稳定触发
+            zygote fd 校验 abort → system_server 重开 → runtime restart 循环，
+            表现为手机自己重启。
+            目标 App 由用户在 LSPosed/Vector 界面里手动添加。
+        -->
+        <item>com.air.locspoof</item>
     </string-array>
 </resources>

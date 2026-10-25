@@ -133,17 +133,37 @@ object Prefs {
         val tmp = File(ctx.cacheDir, "locspoof.push.xml")
         tmp.writeText(xml)
 
-        val cmd = "cp ${tmp.absolutePath} ${XML.absolutePath} && " +
+        // 拷 + 改属主必须成功，否则 system_server 读不到。
+        val core = "cp ${tmp.absolutePath} ${XML.absolutePath} && " +
             "chmod 644 ${XML.absolutePath} && " +
-            "chown system:system ${XML.absolutePath} && " +
-            "restorecon ${XML.absolutePath}"
+            "chown system:system ${XML.absolutePath}"
+        runSu(core)
+
+        // restorecon 单独跑、失败只警告。
+        // 原因：部分虚拟机（VMOS 等）的 root 环境里 restorecon 不存在或没有权限，
+        // 用 `&&` 串起来会让整条命令非零退出，把「其实已经拷成功了」误报成失败。
+        // 标签不对的后果只是 system_server 读不到该文件 —— 而当前架构
+        // （只勾目标 App、不勾系统框架）根本不依赖它，见 README。
+        val rc = runSu("restorecon ${XML.absolutePath} 2>/dev/null || true")
+
+        "已同步到 ${XML.absolutePath}（system_server 可读）" +
+            if (rc != 0) "（restorecon 未生效，不影响 App 侧生效）" else ""
+    }
+
+    /**
+     * 跑一条 root 命令，失败时抛异常。
+     *
+     * 单独抽出来是因为有两处需要「失败不致命」（restorecon），
+     * 而其余地方（cp / settings put）失败必须当致命错误处理。
+     */
+    private fun runSu(cmd: String): Int {
         val p = ProcessBuilder("su", "-c", cmd)
             .redirectErrorStream(true)
             .start()
         val out = p.inputStream.bufferedReader().readText().trim()
         val code = p.waitFor()
         if (code != 0) error("命令退出码 $code: $out")
-        "已同步到 ${XML.absolutePath}（system_server 可读）"
+        return code
     }
 
     /**

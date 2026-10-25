@@ -439,32 +439,67 @@ object AppHooks {
     /**
      * Settings.Secure 里的 mock_location 开关。
      * 这是最廉价的一道检测：读一下全局设置就知道有没有开模拟位置。
+     *
+     * 覆盖范围比看上去要紧，因为同一个 key 有好几条读取路径：
+     *   - `getInt(cr, "mock_location")`                     2 参
+     *   - `getInt(cr, "mock_location", 0)`                  3 参（带默认值，最常见）
+     *   - `getStringForUser(cr, "mock_location", uid)`      3 参
+     *   - `NameValueCache.getStringForUser(cr, tag, name, uid)`  4 参（内部汇聚点）
+     * 只挡其中一条，剩下的都能读到真值 1 —— 而 `getInt(cr, key, 0)` 恰恰是
+     * 检测 SDK 最爱用的写法。
+     *
+     * key 所在的下标各版本不一样（2 参时在 index 1，NameValueCache 里在 index 2），
+     * 所以不按固定下标取，而是扫一遍所有 String 参数看有没有 "mock_location"。
      */
     private fun hookMockSetting(cl: ClassLoader) {
         val secure = runCatching {
             XposedHelpers.findClass("android.provider.Settings\$Secure", cl)
         }.getOrNull() ?: return log("Settings.Secure missing")
 
-        listOf("getString", "getInt", "getLong", "getFloat").forEach { name ->
-            secure.declaredMethods
-                .filter { it.name == name && it.parameterTypes.size == 2 }
+        hookMockGetters(secure)
+
+        // NameValueCache 是 Settings 所有 get 的内部汇聚点，堵住它能顺带覆盖
+        // 上面没枚举到的重载。它是 private static 嵌套类，类名照样能反射到。
+        runCatching {
+            XposedHelpers.findClass("android.provider.Settings\$NameValueCache", cl)
+        }.getOrNull()?.let { hookMockGetters(it) }
+    }
+
+    private val MOCK_GETTERS = listOf(
+        "getString", "getInt", "getLong", "getFloat", "getBoolean",
+        "getStringForUser", "getIntForUser", "getLongForUser",
+        "getFloatForUser", "getBooleanForUser",
+    )
+
+    private fun hookMockGetters(cls: Class<*>) {
+        var n = 0
+        MOCK_GETTERS.forEach { name ->
+            cls.declaredMethods
+                .filter { it.name == name && it.returnType != Void.TYPE }
                 .forEach { m ->
                     safeHook(m, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (!spoofOn()) return
-                            val key = param.args[1] as? String ?: return
-                            if (key != "mock_location") return
-                            param.result = when (m.returnType) {
-                                String::class.java -> "0"
-                                java.lang.Integer.TYPE -> 0
-                                java.lang.Long.TYPE -> 0L
-                                java.lang.Float.TYPE -> 0f
-                                else -> null
-                            }
+                            val hit = param.args.filterIsInstance<String>()
+                                .any { it == "mock_location" }
+                            if (!hit) return
+                            param.result = zeroFor(m.returnType)
                         }
                     })
+                    n++
                 }
         }
+        log("masked mock_location getters on ${cls.simpleName} x$n")
+    }
+
+    /** 把 mock_location 读成「没开模拟位置」：数值型给 0，字符串型给 "0"。 */
+    private fun zeroFor(t: Class<*>): Any? = when (t) {
+        String::class.java -> "0"
+        java.lang.Integer.TYPE -> 0
+        java.lang.Long.TYPE -> 0L
+        java.lang.Float.TYPE -> 0f
+        java.lang.Boolean.TYPE -> false
+        else -> null
     }
 
     private fun safeHook(m: Method, cb: XC_MethodHook) {

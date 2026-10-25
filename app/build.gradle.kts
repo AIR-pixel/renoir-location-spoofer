@@ -9,8 +9,11 @@ android {
 
     defaultConfig {
         applicationId = "com.air.locspoof"
-        // A11 起 LocationManagerService$Receiver 结构稳定；A10 以下未做适配
-        minSdk = 30
+        // 28 而不是 30：模块主体是「App 进程内改 getter」的路线，只用到 API 18+
+        // 的 API（isMock / setMock 是 API 31，但都走反射按方法名扫描，找不到就跳过），
+        // 所以可以在 Android 9 的虚拟机（VMOS 等）上跑。
+        // 降 minSdk 不影响向上兼容，A17 那台照常。
+        minSdk = 28
         targetSdk = 35
         versionCode = 1
         versionName = "0.1"

@@ -347,12 +347,23 @@ class MainActivity : AppCompatActivity() {
                 "flag=${flag.isSuccess}:${flag.exceptionOrNull()?.message ?: ""} " +
                 "geo=${geo.isSuccess}:${geo.exceptionOrNull()?.message ?: ""}"
         )
+
+        // 成功判定只看 App 侧通道（flag + geo）。
+        //
+        // `/data/system/locspoof.xml` 只有 system_server 才读得到，而当前架构
+        // （README 0.5 节）只勾目标 App、不勾系统框架 —— 这条路根本不在生效链路上。
+        // 把它当成失败条件，会在 root 环境受限的机器上（虚拟机、部分 ROM）
+        // 明明坐标已经写进 Settings.Secure 了，界面却报「同步失败」。
         return when {
-            !sys.isSuccess -> Result.failure(
-                IllegalStateException("同步 /data/system 失败：${sys.exceptionOrNull()?.message}")
-            )
             !flag.isSuccess -> Result.failure(
                 IllegalStateException("写开关失败（目标 App 侧仍会屏蔽）：${flag.exceptionOrNull()?.message}")
+            )
+            !geo.isSuccess -> Result.failure(
+                IllegalStateException("写坐标失败（目标 App 拿不到目标坐标）：${geo.exceptionOrNull()?.message}")
+            )
+            !sys.isSuccess -> Result.success(
+                "已生效（App 侧通道正常）；/data/system 同步失败：" +
+                    "${sys.exceptionOrNull()?.message} —— 只勾目标 App 时不影响生效"
             )
             else -> Result.success("ok")
         }
