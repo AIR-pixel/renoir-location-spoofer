@@ -1,5 +1,6 @@
 *.iml
 .gradle/
+.kotlin/
 /local.properties
 /.idea/
 .DS_Store
@@ -8,3 +9,11 @@
 /captures
 .externalNativeBuild
 .cxx
+
+# 本地工具：发布脚本（含 GitHub 账号与仓库配置）与一次性重建脚本
+/.gh_publish.py
+/_rebuild_remote.py
+
+# 大体二进制不进仓库，走 Release 或共享目录
+*.apk
+/dist/
