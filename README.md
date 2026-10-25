@@ -3,6 +3,10 @@
 面向 **Xiaomi 11 Lite 5G (renoir / M2101K9C) + 澎湃OS 4 移植包 (Android 17)** 编写，
 但 hook 逻辑按 SDK_INT 与类存在性自适应，未绑定具体 ROM。
 
+> **直接下载**：[`LocSpoof-A9-debug.apk`](https://github.com/AIR-pixel/renoir-location-spoofer/releases/latest/download/LocSpoof-A9-debug.apk)（8.2 MB，minSdk 28 / Android 9+，架构无关）
+>
+> 跨设备怎么装、怎么勾作用域，见 [第 13 节「跨平台直接使用：操作手册」](#13-跨平台直接使用操作手册)。
+
 ---
 
 ## 0. 目标设备的实测状态（2026-10-23，已跑通）
