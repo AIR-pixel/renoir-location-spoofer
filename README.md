@@ -20,8 +20,8 @@
 | `/proc/version` | `5.4.268-reUNST (wannq@DESKTOP-...)` | 作者自编内核，非 GKI |
 | bootloader | **真解锁**（fastboot 实测 `Device unlocked: true`） | 见下方「prop 全是假的」 |
 | root | **Magisk 30.7，su 可用** | boot.img 离线 patch 后 `flash boot_ab` |
-| 框架 | ROM 自带 LSPosed v2.1.1 (7790) + Zygisk Next | 无需另装 |
-| 定位 hook | **已生效**（App 侧改写 getter，见第 0.5 节） | 系统框架作用域已移除 |
+| 框架 | ROM 自带 LSPosed v2.1.1 (7790) + Zygisk Next 1.4.5 | 无需另装；2026-10 已升到 LSPosed 2.2.1 (7912) |
+| 定位 hook | **已生效**（App 侧改写 getter，见第 0.5 节） | 系统框架作用域必须**手动**清空 |
 
 ### 0.5 架构变更：不挂 system_server 了（重要）
 
@@ -49,6 +49,72 @@ zygote 一死，init 就做框架级 runtime restart —— 用户看到的就�
 
 代价与收益：只对作用域内的 App 生效，不再全系统伪造；换来的是**系统不再重启**。
 对「让校园跑认错位置」这个目标来说，代价为零。
+
+### 0.6 ⚠️ 升级模块前必须清掉作用域残留（2026-10-25 第二次卡 fastboot 的教训）
+
+**改 manifest 里的 `xposed_scope` 不等于改设备上的作用域。** LSPosed 只在**首次安装**时按 manifest
+预选作用域，之后一律以 `/data/adb/lspd/config/modules_config.db` 的 `scope` 表为准 ——
+manifest 改了、APK 升级了，那行 `('com.air.locspoof','system')` 照样留着。
+
+0.5 节那次「放弃 system_server」的改造只改了 manifest，设备上那行 system 一直没删，模块继续在
+system_server 里跑。结果：
+
+```
+java.lang.ArrayIndexOutOfBoundsException: length=0; index=0
+    at android.location.GnssStatus.getCarrierFrequencyHz(GnssStatus.java:370)
+    at com.android.server.location.gnss.GnssMetrics.logCn0L5(GnssMetrics.java:234)
+    at ...GnssLocationProvider.handleReportSvStatus(GnssLocationProvider.java:1541)
+```
+
+模块伪造的 `GnssStatus` 有 12 颗星、但载波频率数组是空的，`GnssMetrics` 一读就越界 →
+system_server 挂 → init soft reboot → zygote 重启撞 FD 5 FIFO（第 9 节）→ 循环 → 烧光 retry-count → fastboot。
+**GNSS 一有数据就触发**，所以表现为随机发作，不是开机必崩 —— 机器能安静跑十几分钟再突然「自己重启」。
+
+查（设备上没有 `sqlite3`，busybox 也没这个 applet，必须拷出来查）：
+
+```bash
+adb shell "su -c 'cp /data/adb/lspd/config/modules_config.db /data/local/tmp/mc.db; \
+  cp /data/adb/lspd/config/modules_config.db-wal /data/local/tmp/mc.db-wal 2>/dev/null; \
+  chmod 666 /data/local/tmp/mc.db*'"
+adb pull /data/local/tmp/mc.db ./mc.db
+python -c "import sqlite3;print(sqlite3.connect('mc.db').execute('SELECT module_pkg_name,app_pkg_name FROM scope').fetchall())"
+```
+
+改（本地 checkpoint 成自包含单文件，否则推过去是新旧混合）：
+
+```python
+con = sqlite3.connect('mc.db')
+con.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+con.execute("DELETE FROM scope WHERE module_pkg_name='com.air.locspoof' AND app_pkg_name='system'")
+con.commit()
+con.execute('PRAGMA wal_checkpoint(TRUNCATE)')   # 第二次 checkpoint 后 db 才自包含
+con.close()
+```
+
+推回（`-wal`/`-shm` 不删会与新 db 不匹配；`chcon` 不能省，`cp` 新建的文件会拿到 `adb_data_file` 上下文）：
+
+```bash
+adb push mc.db /data/local/tmp/mc_new.db
+adb shell "su -c 'cp /data/local/tmp/mc_new.db /data/adb/lspd/config/modules_config.db && \
+  rm -f /data/adb/lspd/config/modules_config.db-wal /data/adb/lspd/config/modules_config.db-shm && \
+  chmod 600 /data/adb/lspd/config/modules_config.db && \
+  chown root:root /data/adb/lspd/config/modules_config.db && \
+  chcon u:object_r:system_file:s0 /data/adb/lspd/config/modules_config.db'"
+```
+
+改完**必须重启**（lspd 是 post-fs-data 起的，杀了没有守护进程拉起）。
+
+验证成功的标志：
+
+```bash
+# 应为空 —— system_server 里不再有本模块
+grep "(system)\[com.air.locspoof" /data/adb/lspd/log/modules_*.log
+# 应有 —— App 侧 hook 完好
+grep "(com.air.locspoof)\[com.air.locspoof" /data/adb/lspd/log/modules_*.log | head
+```
+
+正常状态下 system_server 里只剩 `(system)[com.tsng.hidemyapplist]`（隐藏应用列表本来就需要 system 作用域）。
+
 
 
 ### prop 全是假的
@@ -438,7 +504,9 @@ Kotlin 编译守护进程偶尔报 `daemon has terminated unexpectedly`，不影
 4. **作用域只勾目标 App**（外加模块自己 `com.air.locspoof`，界面上的「验证定位」靠它自检）。
    **不要勾「系统框架」/ `android` / `com.android.phone`** —— 当前架构走 App 进程内改 getter，
    根本不挂 system_server，勾上系统框架反而会在 A17 上把整机拖进 runtime restart 循环（见 0.5 节）。
-   模块的默认作用域已改成只含自身。
+   ⚠️ **从旧版本升级的，这一步不够**：manifest 里「默认只含自身」只在首次安装时生效，
+   LSPosed 会保留旧的 scope 记录。升级后必须按 **0.6 节**的命令查一遍 `scope` 表、删掉 `system` 那行再重启，
+   否则模块仍在 system_server 里跑，GNSS 一有数据就崩。
 5. 重启（作用域含 system_server 时必须重启，force-stop 不够）。
 6. 打开本 App 写入坐标 → 点「自检」确认 su 可用、配置可读。
 7. 看 Vector 日志里的 `[LocSpoof/Sys]` 确认 hook 装上了。
@@ -543,6 +611,17 @@ zygote 在 fork system_server 前要枚举并校验继承下来的 fd，A17 的�
 碰到 FIFO 就直接 abort。这是 Zygisk Next + LSPosed 在这套移植包上的老问题，
 **崩在 fork 阶段，模块的 Java 代码还没开始执行**，改模块治不了。
 表现为：system_server 起不来 → 反复失败 → 计数烧光 → fastboot。
+
+两种触发场景，排查入口不一样：
+
+| 场景 | 怎么认 | 第一现场在哪 |
+|---|---|---|
+| 冷启动就崩 | `sys.boot_completed` 一直空、adb 反复掉线 | `/data/tombstones/`（`zygote64` / `init second_stage`） |
+| **运行中突然「自己重启」** | `cat /proc/uptime` 数值很大、没归零 | **`/data/system/dropbox/` 的 `system_server_crash@*`** |
+
+第二种最容易误判成「手机重启了」—— 其实是 init 做 soft reboot（重跑 `init second_stage`），内核没重启。
+tombstone 里只会留下 zygote 和 init 的二次崩溃，**真正的第一现场（谁先把 system_server 弄崩的）在 dropbox 里**。
+2026-10-25 那次就是靠这个查出 GNSS 数组越界的，详见 0.6 节。
 
 顺带一个必须记住的顺序问题：**装完模块 APK 后的第一次重启，system_server 里未必加载到模块**
 （日志里没有 `(system)` 开头的 `LocSpoof` 行，`dumpsys location` 的 last location 是 `null`）。
