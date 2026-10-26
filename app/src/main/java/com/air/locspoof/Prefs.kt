@@ -55,6 +55,17 @@ object Prefs {
      */
     const val SECURE_KEY = "locspoof_on"
 
+    /**
+     * 兼容模式开关（默认 0 = 关）。
+     *
+     * 开着时目标 App 进程**不再屏蔽 WiFi / 基站**，让依赖多源融合的定位 SDK
+     * （腾讯自研 LBS、微信小程序等）能自己算出结果。代价是这些 SDK 可能凭
+     * 真实 WiFi 指纹反查到真实位置，绕开本模块的坐标伪造。
+     *
+     * 用 `settings put secure locspoof_compat 1` 切换，force-stop 目标 App 生效。
+     */
+    const val K_COMPAT = "locspoof_compat"
+
     // SharedPreferences 序列化后的形态：
     //   <boolean name="enabled" value="true" />
     //   <float name="lat" value="22.5431" />
